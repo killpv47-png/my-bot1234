@@ -9,8 +9,16 @@ jobs:
   bot:
     runs-on: ubuntu-latest
     steps:
-      - name: راه‌اندازی محیط
+      - name: راه‌اندازی محیط (Firefox بدون snap)
         run: |
+          sudo apt-get update
+          # حذف snap و اضافه کردن PPA موزیلا
+          sudo snap remove firefox
+          sudo add-apt-repository -y ppa:mozillateam/ppa
+          # به‌روزرسانی ترجیحات برای نصب نسخه .deb
+          echo 'Package: firefox*' | sudo tee /etc/apt/preferences.d/mozilla-firefox
+          echo 'Pin: release o=LP-PPA-mozillateam' | sudo tee -a /etc/apt/preferences.d/mozilla-firefox
+          echo 'Pin-Priority: 1001' | sudo tee -a /etc/apt/preferences.d/mozilla-firefox
           sudo apt-get update
           sudo apt-get install -y firefox xvfb
           pip3 install selenium webdriver-manager opencv-python-headless requests numpy
@@ -21,7 +29,7 @@ jobs:
           OWNER_CHAT_ID: ${{ secrets.OWNER_CHAT_ID }}
         run: |
           python3 - << 'PYEOF'
-          import requests, time, io, cv2, numpy as np, base64, os
+          import requests, time, io, cv2, numpy as np, base64, os, sys
           from selenium import webdriver
           from selenium.webdriver.firefox.options import Options
           from selenium.webdriver.common.action_chains import ActionChains
@@ -32,12 +40,24 @@ jobs:
           OWNER = os.environ['OWNER_CHAT_ID']
           BASE = f"https://api.telegram.org/bot{TOKEN}"
 
-          opts = Options()
-          opts.add_argument("--headless")
-          service = Service(executable_path=GeckoDriverManager().install())
-          driver = webdriver.Firefox(service=service, options=opts)
-          driver.set_window_size(1280, 720)
-          driver.get("about:blank")
+          # تابع ارسال پیغم خطا اگر راه‌اندازی نشد
+          def send_error(text):
+              try:
+                  requests.post(f"{BASE}/sendMessage", json={"chat_id": OWNER, "text": text})
+              except:
+                  pass
+
+          try:
+              opts = Options()
+              opts.add_argument("--headless")
+              # موتور GeckoDriver خودکار توسط webdriver-manager
+              service = Service(executable_path=GeckoDriverManager().install())
+              driver = webdriver.Firefox(service=service, options=opts)
+              driver.set_window_size(1280, 720)
+              driver.get("about:blank")
+          except Exception as e:
+              send_error(f"❌ راه‌اندازی مرورگر شکست خورد: {e}")
+              sys.exit(1)
 
           def send_msg(chat, text):
               requests.post(f"{BASE}/sendMessage", json={"chat_id": chat, "text": text})
