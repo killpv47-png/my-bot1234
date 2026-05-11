@@ -1,0 +1,151 @@
+name: Browser Bot (5h 58m cycle)
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'   # هر ۶ ساعت یکبار (۱۲:۰۰، ۶:۰۰، ۱۸:۰۰، ۰۰:۰۰ UTC)
+  workflow_dispatch:
+
+jobs:
+  bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: راه‌اندازی محیط
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y firefox firefox-geckodriver xvfb
+          pip3 install selenium opencv-python-headless requests numpy
+
+      - name: اجرای ربات (۵ ساعت و ۵۸ دقیقه)
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          OWNER_CHAT_ID: ${{ secrets.OWNER_CHAT_ID }}
+        run: |
+          python3 - << 'PYEOF'
+          import requests, time, io, cv2, numpy as np, base64, os
+          from selenium import webdriver
+          from selenium.webdriver.firefox.options import Options
+          from selenium.webdriver.common.action_chains import ActionChains
+
+          TOKEN = os.environ['BOT_TOKEN']
+          OWNER = os.environ['OWNER_CHAT_ID']
+          BASE = f"https://api.telegram.org/bot{TOKEN}"
+
+          # مرورگر headless
+          opts = Options()
+          opts.add_argument("--headless")
+          driver = webdriver.Firefox(options=opts)
+          driver.set_window_size(1280, 720)
+          driver.get("about:blank")
+
+          def send_msg(chat, text):
+              requests.post(f"{BASE}/sendMessage", json={"chat_id": chat, "text": text})
+
+          def send_photo(chat, img_bytes, caption=""):
+              files = {"photo": ("screen.png", io.BytesIO(img_bytes), "image/png")}
+              requests.post(f"{BASE}/sendPhoto", data={"chat_id": chat, "caption": caption}, files=files)
+
+          def screenshot():
+              b64 = driver.get_screenshot_as_base64()
+              return base64.b64decode(b64)
+
+          def find_any_colored_spot(img_bytes):
+              """
+              هر نقطه رنگی را تشخیص بده (با saturation بالا و مساحت کافی)
+              """
+              nparr = np.frombuffer(img_bytes, np.uint8)
+              img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+              hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+              # هر چیزی که saturation بالاتر از 150 و value بین 50 تا 250
+              mask = cv2.inRange(hsv, np.array([0, 150, 50]), np.array([180, 255, 250]))
+              # morphology برای حذف نویز
+              kernel = np.ones((5,5), np.uint8)
+              mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+              mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+              contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+              if not contours:
+                  return None
+              # بزرگترین contour
+              c = max(contours, key=cv2.contourArea)
+              area = cv2.contourArea(c)
+              if area < 20:   # نقطه خیلی کوچک نادیده
+                  return None
+              M = cv2.moments(c)
+              if M["m00"] == 0:
+                  return None
+              cx = int(M["m10"] / M["m00"])
+              cy = int(M["m01"] / M["m00"])
+              # تبدیل به مختصات پنجره مرورگر
+              h, w = img.shape[:2]
+              win_w = driver.execute_script("return window.innerWidth")
+              win_h = driver.execute_script("return window.innerHeight")
+              target_x = (cx / w) * win_w
+              target_y = (cy / h) * win_h
+              return (target_x, target_y)
+
+          def type_text(text):
+              driver.switch_to.active_element.send_keys(text)
+
+          send_msg(OWNER, "🚀 ربات روشن شد (۵:۵۸ ساعت آنلاین)\n"
+                           "/go https://example.com\n"
+                           "عکس رو ویرایش کن و هر نقطه رنگی بذار بعد بفرست\n"
+                           "/txt متن - تایپ در محل فعال")
+
+          # مدت زمان اجرا: 5 ساعت و 58 دقیقه (به ثانیه)
+          runtime = 5 * 3600 + 58 * 60
+          end_at = time.time() + runtime
+          offset = 0
+
+          while time.time() < end_at:
+              try:
+                  resp = requests.get(f"{BASE}/getUpdates?timeout=25&offset={offset}").json()
+              except:
+                  continue
+              if not resp.get("result"):
+                  continue
+              for upd in resp["result"]:
+                  offset = upd["update_id"] + 1
+                  msg = upd.get("message")
+                  if not msg or str(msg["chat"]["id"]) != OWNER:
+                      continue
+
+                  if msg.get("text"):
+                      text = msg["text"]
+                      if text.startswith("/go"):
+                          url = text[4:].strip()
+                          if not url.startswith("http"):
+                              url = "https://" + url
+                          driver.get(url)
+                          time.sleep(3)
+                          img = screenshot()
+                          send_photo(OWNER, img, caption=f"✅ {url}")
+
+                      elif text.startswith("/txt"):
+                          content = text[5:].strip()
+                          if content:
+                              type_text(content)
+                              time.sleep(1)
+                              img = screenshot()
+                              send_photo(OWNER, img, caption=f"⌨️ تایپ شد: {content}")
+
+                  elif msg.get("photo"):
+                      file_id = msg["photo"][-1]["file_id"]
+                      file_info = requests.get(f"{BASE}/getFile?file_id={file_id}").json()
+                      file_path = file_info["result"]["file_path"]
+                      file_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
+                      img_data = requests.get(file_url).content
+                      coords = find_any_colored_spot(img_data)
+                      if coords is None:
+                          send_msg(OWNER, "❌ هیچ نقطه رنگی قابل تشخیص پیدا نشد.")
+                      else:
+                          act = ActionChains(driver)
+                          act.move_by_offset(coords[0], coords[1]).click().perform()
+                          act.reset_actions()
+                          time.sleep(2)
+                          img = screenshot()
+                          send_photo(OWNER, img, caption="👆 کلیک شد.")
+
+              time.sleep(0.3)
+
+          driver.quit()
+          send_msg(OWNER, "😴 ۵:۵۸ تمام شد، تا ۲ دقیقه دیگر دوباره روشن می‌شود.")
+          PYEOF
