@@ -47,9 +47,13 @@ jobs:
           try:
               opts = Options()
               opts.add_argument("--headless")
+              # تنظیمات برای نمایش دسکتاپ کامل
+              opts.add_argument("--window-size=1920,1080")
+              opts.set_preference("general.useragent.override",
+                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/109.0")
               service = Service(executable_path=GeckoDriverManager().install())
               driver = webdriver.Firefox(service=service, options=opts)
-              driver.set_window_size(1280, 720)
+              driver.set_window_size(1920, 1080)
               driver.get("about:blank")
           except Exception as e:
               send_error(f"❌ راه‌اندازی مرورگر شکست خورد: {e}")
@@ -95,14 +99,17 @@ jobs:
           def type_text(text):
               driver.switch_to.active_element.send_keys(text)
 
-          # وضعیت کلیک راست
-          right_click = False
+          right_click = False         # وضعیت کلیک راست
+          typing_mode = False        # وضعیت تایپ خودکار
 
-          send_msg(OWNER, "🚀 ربات روشن شد (۵:۵۸ ساعت آنلاین)\n"
-                           "/go https://example.com\n"
-                           "/click : تغییر حالت کلیک (اکنون کلیک چپ)\n"
-                           "عکس رو ویرایش کن و هر نقطه رنگی بذار بعد بفرست\n"
-                           "/txt متن - تایپ در محل فعال")
+          send_msg(OWNER,
+              "🚀 ربات روشن شد (۵:۵۸ ساعت آنلاین)\n\n"
+              "دستورات:\n"
+              "/go https://example.com  - باز کردن سایت\n"
+              "/click  - تغییر حالت کلیک (چپ/راست)\n"
+              "/typing - روشن/خاموش تایپ خودکار\n"
+              "وقتی تایپ خودکار روشنه، هر متنی بفرستی توی فیلد فعال تایپ میشه.\n"
+              "عکس رو ویرایش کن و هر نقطه رنگی بذار بعد بفرست تا کلیک شه.")
 
           runtime = 5 * 3600 + 58 * 60
           end_at = time.time() + runtime
@@ -123,6 +130,7 @@ jobs:
 
                   if msg.get("text"):
                       text = msg["text"]
+
                       if text.startswith("/go"):
                           url = text[4:].strip()
                           if not url.startswith("http"):
@@ -135,15 +143,28 @@ jobs:
                       elif text.startswith("/click"):
                           right_click = not right_click
                           mode = "کلیک راست" if right_click else "کلیک چپ"
-                          send_msg(OWNER, f"🖱️ حالت کلیک تغییر کرد: {mode}")
+                          send_msg(OWNER, f"🖱️ حالت کلیک: {mode}")
+
+                      elif text.startswith("/typing"):
+                          typing_mode = not typing_mode
+                          state = "روشن" if typing_mode else "خاموش"
+                          send_msg(OWNER, f"⌨️ حالت تایپ خودکار {state} شد.")
 
                       elif text.startswith("/txt"):
+                          # همچنان پشتیبانی میشود
                           content = text[5:].strip()
                           if content:
                               type_text(content)
                               time.sleep(1)
                               img = screenshot()
                               send_photo(OWNER, img, caption=f"⌨️ تایپ شد: {content}")
+
+                      elif typing_mode:
+                          # در حالت تایپ خودکار، خود متن را تایپ کن
+                          type_text(text)
+                          time.sleep(1)
+                          img = screenshot()
+                          send_photo(OWNER, img, caption=f"⌨️ تایپ شد: {text}")
 
                   elif msg.get("photo"):
                       file_id = msg["photo"][-1]["file_id"]
@@ -158,9 +179,9 @@ jobs:
                           act = ActionChains(driver)
                           act.move_by_offset(coords[0], coords[1])
                           if right_click:
-                              act.context_click()   # کلیک راست
+                              act.context_click()
                           else:
-                              act.click()           # کلیک چپ
+                              act.click()
                           act.perform()
                           act.reset_actions()
                           time.sleep(2)
