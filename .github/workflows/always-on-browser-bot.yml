@@ -12,9 +12,8 @@ jobs:
       - name: راه‌اندازی محیط
         run: |
           sudo apt-get update
-          # نصب فایرفاکس و درایور مربوطه از مخازن اوبونتو
-          sudo apt-get install -y firefox firefox-geckodriver xvfb
-          pip3 install selenium opencv-python-headless requests numpy
+          sudo apt-get install -y firefox xvfb
+          pip3 install selenium webdriver-manager opencv-python-headless requests numpy
 
       - name: اجرای ربات (۵ ساعت و ۵۸ دقیقه)
         env:
@@ -26,6 +25,8 @@ jobs:
           from selenium import webdriver
           from selenium.webdriver.firefox.options import Options
           from selenium.webdriver.common.action_chains import ActionChains
+          from webdriver_manager.firefox import GeckoDriverManager
+          from selenium.webdriver.firefox.service import Service
 
           TOKEN = os.environ['BOT_TOKEN']
           OWNER = os.environ['OWNER_CHAT_ID']
@@ -33,7 +34,8 @@ jobs:
 
           opts = Options()
           opts.add_argument("--headless")
-          driver = webdriver.Firefox(options=opts)
+          service = Service(executable_path=GeckoDriverManager().install())
+          driver = webdriver.Firefox(service=service, options=opts)
           driver.set_window_size(1280, 720)
           driver.get("about:blank")
 
