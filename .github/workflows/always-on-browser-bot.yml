@@ -12,10 +12,8 @@ jobs:
       - name: راه‌اندازی محیط (Firefox بدون snap)
         run: |
           sudo apt-get update
-          # حذف snap و اضافه کردن PPA موزیلا
           sudo snap remove firefox
           sudo add-apt-repository -y ppa:mozillateam/ppa
-          # به‌روزرسانی ترجیحات برای نصب نسخه .deb
           echo 'Package: firefox*' | sudo tee /etc/apt/preferences.d/mozilla-firefox
           echo 'Pin: release o=LP-PPA-mozillateam' | sudo tee -a /etc/apt/preferences.d/mozilla-firefox
           echo 'Pin-Priority: 1001' | sudo tee -a /etc/apt/preferences.d/mozilla-firefox
@@ -40,7 +38,6 @@ jobs:
           OWNER = os.environ['OWNER_CHAT_ID']
           BASE = f"https://api.telegram.org/bot{TOKEN}"
 
-          # تابع ارسال پیغم خطا اگر راه‌اندازی نشد
           def send_error(text):
               try:
                   requests.post(f"{BASE}/sendMessage", json={"chat_id": OWNER, "text": text})
@@ -50,7 +47,6 @@ jobs:
           try:
               opts = Options()
               opts.add_argument("--headless")
-              # موتور GeckoDriver خودکار توسط webdriver-manager
               service = Service(executable_path=GeckoDriverManager().install())
               driver = webdriver.Firefox(service=service, options=opts)
               driver.set_window_size(1280, 720)
@@ -99,8 +95,12 @@ jobs:
           def type_text(text):
               driver.switch_to.active_element.send_keys(text)
 
+          # وضعیت کلیک راست
+          right_click = False
+
           send_msg(OWNER, "🚀 ربات روشن شد (۵:۵۸ ساعت آنلاین)\n"
                            "/go https://example.com\n"
+                           "/click : تغییر حالت کلیک (اکنون کلیک چپ)\n"
                            "عکس رو ویرایش کن و هر نقطه رنگی بذار بعد بفرست\n"
                            "/txt متن - تایپ در محل فعال")
 
@@ -132,6 +132,11 @@ jobs:
                           img = screenshot()
                           send_photo(OWNER, img, caption=f"✅ {url}")
 
+                      elif text.startswith("/click"):
+                          right_click = not right_click
+                          mode = "کلیک راست" if right_click else "کلیک چپ"
+                          send_msg(OWNER, f"🖱️ حالت کلیک تغییر کرد: {mode}")
+
                       elif text.startswith("/txt"):
                           content = text[5:].strip()
                           if content:
@@ -151,11 +156,17 @@ jobs:
                           send_msg(OWNER, "❌ هیچ نقطه رنگی قابل تشخیص پیدا نشد.")
                       else:
                           act = ActionChains(driver)
-                          act.move_by_offset(coords[0], coords[1]).click().perform()
+                          act.move_by_offset(coords[0], coords[1])
+                          if right_click:
+                              act.context_click()   # کلیک راست
+                          else:
+                              act.click()           # کلیک چپ
+                          act.perform()
                           act.reset_actions()
                           time.sleep(2)
                           img = screenshot()
-                          send_photo(OWNER, img, caption="👆 کلیک شد.")
+                          mode = "راست" if right_click else "چپ"
+                          send_photo(OWNER, img, caption=f"👆 کلیک {mode} شد.")
 
               time.sleep(0.3)
 
