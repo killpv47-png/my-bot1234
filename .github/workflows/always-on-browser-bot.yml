@@ -2,7 +2,7 @@ name: Browser Bot (5h 58m cycle)
 
 on:
   schedule:
-    - cron: '0 */6 * * *'   # هر ۶ ساعت یکبار
+    - cron: '0 */6 * * *'
   workflow_dispatch:
 
 jobs:
@@ -13,6 +13,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y firefox xvfb
+          # دانلود geckodriver و قرار دادن در مسیر
+          wget https://github.com/mozilla/geckodriver/releases/latest/download/geckodriver-linux64.tar.gz
+          tar -xvzf geckodriver-linux64.tar.gz
+          sudo mv geckodriver /usr/local/bin/
           pip3 install selenium opencv-python-headless requests numpy
 
       - name: اجرای ربات (۵ ساعت و ۵۸ دقیقه)
@@ -24,15 +28,18 @@ jobs:
           import requests, time, io, cv2, numpy as np, base64, os
           from selenium import webdriver
           from selenium.webdriver.firefox.options import Options
+          from selenium.webdriver.firefox.service import Service
           from selenium.webdriver.common.action_chains import ActionChains
 
           TOKEN = os.environ['BOT_TOKEN']
           OWNER = os.environ['OWNER_CHAT_ID']
           BASE = f"https://api.telegram.org/bot{TOKEN}"
 
+          # تنظیم مسیر geckodriver
+          service = Service(executable_path="/usr/local/bin/geckodriver")
           opts = Options()
           opts.add_argument("--headless")
-          driver = webdriver.Firefox(options=opts)
+          driver = webdriver.Firefox(service=service, options=opts)
           driver.set_window_size(1280, 720)
           driver.get("about:blank")
 
@@ -51,7 +58,6 @@ jobs:
               nparr = np.frombuffer(img_bytes, np.uint8)
               img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
               hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-              # هر نقطه با اشباع بالا (رنگی) و روشنایی متوسط
               mask = cv2.inRange(hsv, np.array([0, 150, 50]), np.array([180, 255, 250]))
               kernel = np.ones((5,5), np.uint8)
               mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
