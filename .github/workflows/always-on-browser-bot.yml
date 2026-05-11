@@ -1,4 +1,4 @@
-name: Telegram Commander Bot (NoVNC + Control Panel)
+name: Telegram Gemini Browser Bot
 
 on:
   schedule:
@@ -9,7 +9,7 @@ jobs:
   bot:
     runs-on: ubuntu-latest
     steps:
-      - name: نصب تمام ابزارها
+      - name: Install Dependencies
         run: |
           sudo apt-get update
           sudo snap remove firefox 2>/dev/null || true
@@ -19,9 +19,11 @@ jobs:
           echo 'Pin-Priority: 1001' | sudo tee -a /etc/apt/preferences.d/mozilla-firefox
           sudo apt-get update
           sudo apt-get install -y firefox xvfb x11vnc novnc websockify fluxbox
-          pip3 install selenium webdriver-manager opencv-python-headless requests numpy
+          pip3 install selenium webdriver-manager opencv-python-headless requests numpy google-genai playwright
+          playwright install-deps firefox
+          playwright install firefox
 
-      - name: راه‌اندازی VNC و تونل برای مرورگر زنده
+      - name: Setup VNC & Tunnel
         run: |
           export DISPLAY=:99
           Xvfb :99 -screen 0 1920x1080x24 &
@@ -39,119 +41,162 @@ jobs:
           ./cloudflared tunnel --url http://localhost:6080 2>&1 | tee /tmp/cf-log &
           sleep 12
           URL=$(grep -oP 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cf-log | head -n 1)
-          if [ -z "$URL" ]; then
-            echo "❌ لینک تونل پیدا نشد."
-            exit 1
-          fi
           echo "NOVNC_URL=$URL" >> $GITHUB_ENV
 
-      - name: اجرای ربات فرمانده (۵ ساعت و ۵۸ دقیقه)
+      - name: Run Gemini-Powered Bot
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           OWNER_CHAT_ID: ${{ secrets.OWNER_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           NOVNC_URL: ${{ env.NOVNC_URL }}
         run: |
           python3 - << 'PYEOF'
-          import requests, time, io, cv2, numpy as np, base64, os, sys
+          import os, sys, time, io, base64, requests, numpy as np, cv2
+          from google import genai
           from selenium import webdriver
           from selenium.webdriver.firefox.options import Options
-          from selenium.webdriver.common.action_chains import ActionChains
-          from selenium.webdriver.common.keys import Keys
-          from webdriver_manager.firefox import GeckoDriverManager
           from selenium.webdriver.firefox.service import Service
-          from selenium.webdriver.support.ui import WebDriverWait
+          from webdriver_manager.firefox import GeckoDriverManager
 
           TOKEN = os.environ['BOT_TOKEN']
           OWNER = os.environ['OWNER_CHAT_ID']
           NOVNC_URL = os.environ.get('NOVNC_URL', '')
+          GEMINI_API_KEY = os.environ['GEMINI_API_KEY']
           BASE = f"https://api.telegram.org/bot{TOKEN}"
+          MODEL_NAME = "gemini-2.5-computer-use-preview-10-2025"
 
-          def send_error(text):
-              try:
-                  requests.post(f"{BASE}/sendMessage", json={"chat_id": OWNER, "text": text})
-              except:
-                  pass
+          # --- Init Gemini ---
+          client = genai.Client(api_key=GEMINI_API_KEY)
 
-          try:
-              opts = Options()
-              opts.add_argument("--headless")
-              opts.add_argument("--window-size=1920,1080")
-              service = Service(executable_path=GeckoDriverManager().install())
-              driver = webdriver.Firefox(service=service, options=opts)
-              driver.set_window_size(1920, 1080)
-              driver.get("about:blank")
-          except Exception as e:
-              send_error(f"❌ راه‌اندازی مرورگر شکست خورد: {e}")
-              sys.exit(1)
+          # --- Init Selenium ---
+          opts = Options()
+          opts.add_argument("--headless")
+          opts.add_argument("--window-size=1920,1080")
+          svc = Service(executable_path=GeckoDriverManager().install())
+          driver = webdriver.Firefox(service=svc, options=opts)
+          driver.set_window_size(1920, 1080)
+          driver.get("about:blank")
+
+          def screenshot():
+              return base64.b64decode(driver.get_screenshot_as_base64())
 
           def send_msg(chat, text, reply_markup=None):
-              requests.post(f"{BASE}/sendMessage", json={"chat_id": chat, "text": text, "reply_markup": reply_markup})
+              requests.post(f"{BASE}/sendMessage",
+                            json={"chat_id": chat, "text": text, "reply_markup": reply_markup})
 
           def send_photo(chat, img_bytes, caption=""):
               files = {"photo": ("screen.png", io.BytesIO(img_bytes), "image/png")}
               requests.post(f"{BASE}/sendPhoto", data={"chat_id": chat, "caption": caption}, files=files)
 
-          def screenshot():
-              b64 = driver.get_screenshot_as_base64()
-              return base64.b64decode(b64)
+          def execute_action(action):
+              """Execute a single action returned by Gemini Computer Use."""
+              if action is None:
+                  return
+              fn = action.get("name")
+              args = action.get("args", {})
+              if fn == "navigate":
+                  driver.get(args["url"])
+              elif fn == "click":
+                  from selenium.webdriver.common.action_chains import ActionChains
+                  act = ActionChains(driver)
+                  act.move_by_offset(args["x"], args["y"]).click().perform()
+                  act.reset_actions()
+              elif fn == "type":
+                  from selenium.webdriver.common.keys import Keys
+                  driver.switch_to.active_element.send_keys(args["text"])
+              elif fn == "scroll":
+                  driver.execute_script(f"window.scrollBy(0, {args.get('dy', 0)})")
+              elif fn == "wait":
+                  time.sleep(5)
+              elif fn == "go_back":
+                  driver.back()
+              elif fn == "go_forward":
+                  driver.forward()
+              elif fn == "refresh":
+                  driver.refresh()
+              elif fn == "key_combination":
+                  from selenium.webdriver.common.keys import Keys
+                  keys = args["keys"]
+                  driver.switch_to.active_element.send_keys(*[getattr(Keys, k.upper(), k) for k in keys])
+              # More actions can be added as needed
 
-          def find_any_colored_spot(img_bytes):
-              nparr = np.frombuffer(img_bytes, np.uint8)
-              img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-              hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-              mask = cv2.inRange(hsv, np.array([0, 150, 50]), np.array([180, 255, 250]))
-              kernel = np.ones((5,5), np.uint8)
-              mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-              mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-              contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-              if not contours: return None
-              c = max(contours, key=cv2.contourArea)
-              if cv2.contourArea(c) < 20: return None
-              M = cv2.moments(c)
-              if M["m00"] == 0: return None
-              cx = int(M["m10"] / M["m00"])
-              cy = int(M["m01"] / M["m00"])
-              h, w = img.shape[:2]
-              win_w = driver.execute_script("return window.innerWidth")
-              win_h = driver.execute_script("return window.innerHeight")
-              return ((cx / w) * win_w, (cy / h) * win_h)
+          # --- Gemini Agent Loop ---
+          def run_gemini_task(chat_id, goal, max_steps=15):
+              driver.get("about:blank")
+              contents = [{"role": "user", "parts": [{"text": goal}]}]
+              for step in range(max_steps):
+                  img = screenshot()
+                  contents.append({
+                      "role": "user",
+                      "parts": [
+                          {"inline_data": {"mime_type": "image/png", "data": base64.b64encode(img).decode()}}
+                      ]
+                  })
+                  try:
+                      resp = client.models.generate_content(
+                          model=MODEL_NAME,
+                          contents=contents,
+                          config={
+                              "tools": [{"computer_use": {"environment": "browser"}}],
+                              "temperature": 0.2
+                          }
+                      )
+                  except Exception as e:
+                      send_msg(chat_id, f"❌ Gemini error: {e}")
+                      return
 
-          def wait_and_sleep(sec=3):
-              try:
-                  WebDriverWait(driver, 10).until(lambda d: d.execute_script("return document.readyState") == "complete")
-              except:
-                  pass
-              time.sleep(sec)
+                  if not resp.candidates:
+                      send_msg(chat_id, "❌ No response from Gemini.")
+                      return
 
-          # حالت‌های ربات
-          right_click = False
-          typing_mode = False
+                  candidate = resp.candidates[0]
+                  if not candidate.content or not candidate.content.parts:
+                      send_msg(chat_id, "✅ Task completed.")
+                      break
 
-          # کیبورد شیشه‌ای همیشگی (Replay Keyboard)
-          main_keyboard = {
+                  part = candidate.content.parts[0]
+                  if part.text:
+                      send_msg(chat_id, f"💬 Gemini: {part.text[:200]}")
+                      break
+                  elif part.function_call:
+                      action = {
+                          "name": part.function_call.name,
+                          "args": dict(part.function_call.args)
+                      }
+                      execute_action(action)
+                      time.sleep(1)
+                      # Send screenshot after action
+                      send_photo(chat_id, screenshot(), caption=f"🖱️ Action: {action['name']}")
+                      # Append model response to history
+                      contents.append({
+                          "role": "model",
+                          "parts": [{"function_call": part.function_call}]
+                      })
+                  else:
+                      send_msg(chat_id, "🤷 Unknown response part.")
+                      break
+
+          # --- Telegram Bot Setup ---
+          main_kb = {
               "keyboard": [
-                  ["🖱️ چپ/راست", "⌨️ تایپ خودکار", "🔄 رفرش"],
-                  ["⬅️ بک‌اسپیس", "␣ فاصله", "⏎ اینتر", "↹ تب"],
-                  ["🌐 مرورگر زنده"]
+                  ["🖱️ Click", "⌨️ Type", "🔄 Refresh"],
+                  ["🌐 Live Browser"]
               ],
               "resize_keyboard": True
           }
 
-          welcome_msg = ("🚀 ربات فرمانده روشن شد (۵:۵۸ ساعت)\n"
-                         "⬇️ دکمه‌ها را ببینید. برای مرورگر تمام‌صفحه روی «مرورگر زنده» بزنید.\n"
-                         "/go https://example.com  - باز کردن سایت\n"
-                         "عکس با نقطه رنگی بفرست تا کلیک شود.\n"
-                         "/txt متن - تایپ مستقیم")
-
-          # اگر لینک noVNC داریم، دکمه اینلاین هم بفرستیم
-          inline_markup = None
+          inline_kb = None
           if NOVNC_URL:
-              inline_markup = {"inline_keyboard": [[{"text": "🌐 باز کردن مرورگر زنده (لمسی)", "url": NOVNC_URL}]]}
+              inline_kb = {"inline_keyboard": [[{"text": "🌐 Open Live Browser", "url": NOVNC_URL}]]}
 
-          send_msg(OWNER, welcome_msg, reply_markup=main_keyboard)
-          if inline_markup:
-              send_msg(OWNER, "⬇️ برای وبگردی حرفه‌ای روی دکمه زیر بزنید:", reply_markup=inline_markup)
+          send_msg(OWNER, "🚀 Gemini Browser Bot is online (5h 58m).\n"
+                           "Send any natural language task and I'll execute it in the browser.\n"
+                           "Example: 'Go to wikipedia.org and search for artificial intelligence'",
+                           reply_markup=main_kb)
+          if inline_kb:
+              send_msg(OWNER, "⬇️ Or use the live browser:", reply_markup=inline_kb)
 
+          # --- Main Loop ---
           runtime = 5 * 3600 + 58 * 60
           end_at = time.time() + runtime
           offset = 0
@@ -161,114 +206,32 @@ jobs:
                   resp = requests.get(f"{BASE}/getUpdates?timeout=25&offset={offset}").json()
               except:
                   continue
-              if not resp.get("result"): continue
+              if not resp.get("result"):
+                  continue
               for upd in resp["result"]:
                   offset = upd["update_id"] + 1
                   msg = upd.get("message")
-                  if not msg or str(msg["chat"]["id"]) != OWNER: continue
-
+                  if not msg or str(msg["chat"]["id"]) != OWNER:
+                      continue
                   text = msg.get("text", "")
-
-                  # دکمه‌های شیشه‌ای
-                  if text == "🖱️ چپ/راست":
-                      right_click = not right_click
-                      send_msg(OWNER, f"🖱️ حالت کلیک: {'کلیک راست' if right_click else 'کلیک چپ'}", reply_markup=main_keyboard)
-                      continue
-                  elif text == "⌨️ تایپ خودکار":
-                      typing_mode = not typing_mode
-                      send_msg(OWNER, f"⌨️ تایپ خودکار: {'روشن' if typing_mode else 'خاموش'}", reply_markup=main_keyboard)
-                      continue
-                  elif text == "🔄 رفرش":
-                      driver.refresh()
-                      wait_and_sleep(2)
-                      img = screenshot()
-                      send_photo(OWNER, img, caption="🔄 صفحه رفرش شد.")
-                      continue
-                  elif text == "⬅️ بک‌اسپیس":
-                      driver.switch_to.active_element.send_keys(Keys.BACKSPACE)
-                      wait_and_sleep(0.5)
-                      img = screenshot()
-                      send_photo(OWNER, img, caption="⬅️ بک‌اسپیس زده شد.")
-                      continue
-                  elif text == "␣ فاصله":
-                      driver.switch_to.active_element.send_keys(Keys.SPACE)
-                      wait_and_sleep(0.5)
-                      img = screenshot()
-                      send_photo(OWNER, img, caption="␣ فاصله تزریق شد.")
-                      continue
-                  elif text == "⏎ اینتر":
-                      driver.switch_to.active_element.send_keys(Keys.ENTER)
-                      wait_and_sleep(0.5)
-                      img = screenshot()
-                      send_photo(OWNER, img, caption="⏎ اینتر زده شد.")
-                      continue
-                  elif text == "↹ تب":
-                      driver.switch_to.active_element.send_keys(Keys.TAB)
-                      wait_and_sleep(0.5)
-                      img = screenshot()
-                      send_photo(OWNER, img, caption="↹ تب فشرده شد.")
-                      continue
-                  elif text == "🌐 مرورگر زنده":
+                  if text.startswith("/"):
+                      cmd = text.split()[0]
+                      if cmd == "/go":
+                          url = text[4:].strip()
+                          run_gemini_task(OWNER, f"Navigate to {url}")
+                      elif cmd == "/task":
+                          run_gemini_task(OWNER, text[6:].strip())
+                  elif text in ["🖱️ Click", "⌨️ Type", "🔄 Refresh"]:
+                      run_gemini_task(OWNER, f"Perform a {text} action")
+                  elif text == "🌐 Live Browser":
                       if NOVNC_URL:
-                          send_msg(OWNER, f"🌐 لینک مرورگر زنده:\n{NOVNC_URL}", reply_markup=main_keyboard)
+                          send_msg(OWNER, f"🌐 Live browser: {NOVNC_URL}", reply_markup=main_kb)
                       else:
-                          send_msg(OWNER, "❌ لینک مرورگر زنده در این چرخه در دسترس نیست.", reply_markup=main_keyboard)
-                      continue
-
-                  # دستورات متنی
-                  if text.startswith("/go"):
-                      url = text[4:].strip()
-                      if not url.startswith("http"): url = "https://" + url
-                      driver.get(url)
-                      wait_and_sleep(3)
-                      img = screenshot()
-                      send_photo(OWNER, img, caption=f"✅ {url}")
-
-                  elif text.startswith("/click"):
-                      right_click = not right_click
-                      send_msg(OWNER, f"🖱️ حالت کلیک: {'راست' if right_click else 'چپ'}")
-
-                  elif text.startswith("/typing"):
-                      typing_mode = not typing_mode
-                      send_msg(OWNER, f"⌨️ تایپ خودکار: {'روشن' if typing_mode else 'خاموش'}")
-
-                  elif text.startswith("/txt"):
-                      content = text[5:].strip()
-                      if content:
-                          driver.switch_to.active_element.send_keys(content)
-                          wait_and_sleep(1)
-                          img = screenshot()
-                          send_photo(OWNER, img, caption=f"⌨️ تایپ شد: {content}")
-
-                  elif typing_mode:
-                      driver.switch_to.active_element.send_keys(text)
-                      wait_and_sleep(1)
-                      img = screenshot()
-                      send_photo(OWNER, img, caption=f"⌨️ تایپ شد: {text}")
-
-                  # دریافت عکس برای کلیک
-                  elif msg.get("photo"):
-                      file_id = msg["photo"][-1]["file_id"]
-                      info = requests.get(f"{BASE}/getFile?file_id={file_id}").json()
-                      file_url = f"https://api.telegram.org/file/bot{TOKEN}/{info['result']['file_path']}"
-                      img_data = requests.get(file_url).content
-                      coords = find_any_colored_spot(img_data)
-                      if coords is None:
-                          send_msg(OWNER, "❌ هیچ نقطه رنگی پیدا نشد.")
-                      else:
-                          act = ActionChains(driver)
-                          act.move_by_offset(coords[0], coords[1])
-                          if right_click: act.context_click()
-                          else: act.click()
-                          act.perform()
-                          act.reset_actions()
-                          wait_and_sleep(3)
-                          img = screenshot()
-                          mode = "راست" if right_click else "چپ"
-                          send_photo(OWNER, img, caption=f"👆 کلیک {mode} شد.")
-
+                          send_msg(OWNER, "❌ Live browser not available in this cycle.", reply_markup=main_kb)
+                  elif text:
+                      run_gemini_task(OWNER, text)
               time.sleep(0.3)
 
           driver.quit()
-          send_msg(OWNER, "😴 ۵:۵۸ تمام شد، تا ۲ دقیقه دیگر دوباره روشن می‌شود.")
+          send_msg(OWNER, "😴 5:58 finished, restarting in 2 minutes.")
           PYEOF
