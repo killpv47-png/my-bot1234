@@ -1,4 +1,4 @@
-name: Browser Bot (5h 58m cycle)
+name: Telegram Commander Bot (NoVNC + Control Panel)
 
 on:
   schedule:
@@ -9,33 +9,61 @@ jobs:
   bot:
     runs-on: ubuntu-latest
     steps:
-      - name: راه‌اندازی محیط (Firefox بدون snap)
+      - name: نصب تمام ابزارها
         run: |
           sudo apt-get update
-          sudo snap remove firefox
+          sudo snap remove firefox 2>/dev/null || true
           sudo add-apt-repository -y ppa:mozillateam/ppa
           echo 'Package: firefox*' | sudo tee /etc/apt/preferences.d/mozilla-firefox
           echo 'Pin: release o=LP-PPA-mozillateam' | sudo tee -a /etc/apt/preferences.d/mozilla-firefox
           echo 'Pin-Priority: 1001' | sudo tee -a /etc/apt/preferences.d/mozilla-firefox
           sudo apt-get update
-          sudo apt-get install -y firefox xvfb
+          sudo apt-get install -y firefox xvfb x11vnc novnc websockify fluxbox
           pip3 install selenium webdriver-manager opencv-python-headless requests numpy
 
-      - name: اجرای ربات (۵ ساعت و ۵۸ دقیقه)
+      - name: راه‌اندازی VNC و تونل برای مرورگر زنده
+        run: |
+          export DISPLAY=:99
+          Xvfb :99 -screen 0 1920x1080x24 &
+          sleep 1
+          fluxbox &
+          sleep 1
+          firefox &
+          sleep 5
+          x11vnc -display :99 -forever -nopw -quiet &
+          sleep 2
+          websockify --web=/usr/share/novnc 6080 localhost:5900 &
+          sleep 2
+          curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
+          chmod +x cloudflared
+          ./cloudflared tunnel --url http://localhost:6080 2>&1 | tee /tmp/cf-log &
+          sleep 12
+          URL=$(grep -oP 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cf-log | head -n 1)
+          if [ -z "$URL" ]; then
+            echo "❌ لینک تونل پیدا نشد."
+            exit 1
+          fi
+          echo "NOVNC_URL=$URL" >> $GITHUB_ENV
+
+      - name: اجرای ربات فرمانده (۵ ساعت و ۵۸ دقیقه)
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           OWNER_CHAT_ID: ${{ secrets.OWNER_CHAT_ID }}
+          NOVNC_URL: ${{ env.NOVNC_URL }}
         run: |
           python3 - << 'PYEOF'
           import requests, time, io, cv2, numpy as np, base64, os, sys
           from selenium import webdriver
           from selenium.webdriver.firefox.options import Options
           from selenium.webdriver.common.action_chains import ActionChains
+          from selenium.webdriver.common.keys import Keys
           from webdriver_manager.firefox import GeckoDriverManager
           from selenium.webdriver.firefox.service import Service
+          from selenium.webdriver.support.ui import WebDriverWait
 
           TOKEN = os.environ['BOT_TOKEN']
           OWNER = os.environ['OWNER_CHAT_ID']
+          NOVNC_URL = os.environ.get('NOVNC_URL', '')
           BASE = f"https://api.telegram.org/bot{TOKEN}"
 
           def send_error(text):
@@ -47,10 +75,7 @@ jobs:
           try:
               opts = Options()
               opts.add_argument("--headless")
-              # تنظیمات برای نمایش دسکتاپ کامل
               opts.add_argument("--window-size=1920,1080")
-              opts.set_preference("general.useragent.override",
-                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/109.0")
               service = Service(executable_path=GeckoDriverManager().install())
               driver = webdriver.Firefox(service=service, options=opts)
               driver.set_window_size(1920, 1080)
@@ -59,8 +84,8 @@ jobs:
               send_error(f"❌ راه‌اندازی مرورگر شکست خورد: {e}")
               sys.exit(1)
 
-          def send_msg(chat, text):
-              requests.post(f"{BASE}/sendMessage", json={"chat_id": chat, "text": text})
+          def send_msg(chat, text, reply_markup=None):
+              requests.post(f"{BASE}/sendMessage", json={"chat_id": chat, "text": text, "reply_markup": reply_markup})
 
           def send_photo(chat, img_bytes, caption=""):
               files = {"photo": ("screen.png", io.BytesIO(img_bytes), "image/png")}
@@ -79,37 +104,53 @@ jobs:
               mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
               mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
               contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-              if not contours:
-                  return None
+              if not contours: return None
               c = max(contours, key=cv2.contourArea)
-              if cv2.contourArea(c) < 20:
-                  return None
+              if cv2.contourArea(c) < 20: return None
               M = cv2.moments(c)
-              if M["m00"] == 0:
-                  return None
+              if M["m00"] == 0: return None
               cx = int(M["m10"] / M["m00"])
               cy = int(M["m01"] / M["m00"])
               h, w = img.shape[:2]
               win_w = driver.execute_script("return window.innerWidth")
               win_h = driver.execute_script("return window.innerHeight")
-              target_x = (cx / w) * win_w
-              target_y = (cy / h) * win_h
-              return (target_x, target_y)
+              return ((cx / w) * win_w, (cy / h) * win_h)
 
-          def type_text(text):
-              driver.switch_to.active_element.send_keys(text)
+          def wait_and_sleep(sec=3):
+              try:
+                  WebDriverWait(driver, 10).until(lambda d: d.execute_script("return document.readyState") == "complete")
+              except:
+                  pass
+              time.sleep(sec)
 
-          right_click = False         # وضعیت کلیک راست
-          typing_mode = False        # وضعیت تایپ خودکار
+          # حالت‌های ربات
+          right_click = False
+          typing_mode = False
 
-          send_msg(OWNER,
-              "🚀 ربات روشن شد (۵:۵۸ ساعت آنلاین)\n\n"
-              "دستورات:\n"
-              "/go https://example.com  - باز کردن سایت\n"
-              "/click  - تغییر حالت کلیک (چپ/راست)\n"
-              "/typing - روشن/خاموش تایپ خودکار\n"
-              "وقتی تایپ خودکار روشنه، هر متنی بفرستی توی فیلد فعال تایپ میشه.\n"
-              "عکس رو ویرایش کن و هر نقطه رنگی بذار بعد بفرست تا کلیک شه.")
+          # کیبورد شیشه‌ای همیشگی (Replay Keyboard)
+          main_keyboard = {
+              "keyboard": [
+                  ["🖱️ چپ/راست", "⌨️ تایپ خودکار", "🔄 رفرش"],
+                  ["⬅️ بک‌اسپیس", "␣ فاصله", "⏎ اینتر", "↹ تب"],
+                  ["🌐 مرورگر زنده"]
+              ],
+              "resize_keyboard": True
+          }
+
+          welcome_msg = ("🚀 ربات فرمانده روشن شد (۵:۵۸ ساعت)\n"
+                         "⬇️ دکمه‌ها را ببینید. برای مرورگر تمام‌صفحه روی «مرورگر زنده» بزنید.\n"
+                         "/go https://example.com  - باز کردن سایت\n"
+                         "عکس با نقطه رنگی بفرست تا کلیک شود.\n"
+                         "/txt متن - تایپ مستقیم")
+
+          # اگر لینک noVNC داریم، دکمه اینلاین هم بفرستیم
+          inline_markup = None
+          if NOVNC_URL:
+              inline_markup = {"inline_keyboard": [[{"text": "🌐 باز کردن مرورگر زنده (لمسی)", "url": NOVNC_URL}]]}
+
+          send_msg(OWNER, welcome_msg, reply_markup=main_keyboard)
+          if inline_markup:
+              send_msg(OWNER, "⬇️ برای وبگردی حرفه‌ای روی دکمه زیر بزنید:", reply_markup=inline_markup)
 
           runtime = 5 * 3600 + 58 * 60
           end_at = time.time() + runtime
@@ -120,71 +161,108 @@ jobs:
                   resp = requests.get(f"{BASE}/getUpdates?timeout=25&offset={offset}").json()
               except:
                   continue
-              if not resp.get("result"):
-                  continue
+              if not resp.get("result"): continue
               for upd in resp["result"]:
                   offset = upd["update_id"] + 1
                   msg = upd.get("message")
-                  if not msg or str(msg["chat"]["id"]) != OWNER:
+                  if not msg or str(msg["chat"]["id"]) != OWNER: continue
+
+                  text = msg.get("text", "")
+
+                  # دکمه‌های شیشه‌ای
+                  if text == "🖱️ چپ/راست":
+                      right_click = not right_click
+                      send_msg(OWNER, f"🖱️ حالت کلیک: {'کلیک راست' if right_click else 'کلیک چپ'}", reply_markup=main_keyboard)
+                      continue
+                  elif text == "⌨️ تایپ خودکار":
+                      typing_mode = not typing_mode
+                      send_msg(OWNER, f"⌨️ تایپ خودکار: {'روشن' if typing_mode else 'خاموش'}", reply_markup=main_keyboard)
+                      continue
+                  elif text == "🔄 رفرش":
+                      driver.refresh()
+                      wait_and_sleep(2)
+                      img = screenshot()
+                      send_photo(OWNER, img, caption="🔄 صفحه رفرش شد.")
+                      continue
+                  elif text == "⬅️ بک‌اسپیس":
+                      driver.switch_to.active_element.send_keys(Keys.BACKSPACE)
+                      wait_and_sleep(0.5)
+                      img = screenshot()
+                      send_photo(OWNER, img, caption="⬅️ بک‌اسپیس زده شد.")
+                      continue
+                  elif text == "␣ فاصله":
+                      driver.switch_to.active_element.send_keys(Keys.SPACE)
+                      wait_and_sleep(0.5)
+                      img = screenshot()
+                      send_photo(OWNER, img, caption="␣ فاصله تزریق شد.")
+                      continue
+                  elif text == "⏎ اینتر":
+                      driver.switch_to.active_element.send_keys(Keys.ENTER)
+                      wait_and_sleep(0.5)
+                      img = screenshot()
+                      send_photo(OWNER, img, caption="⏎ اینتر زده شد.")
+                      continue
+                  elif text == "↹ تب":
+                      driver.switch_to.active_element.send_keys(Keys.TAB)
+                      wait_and_sleep(0.5)
+                      img = screenshot()
+                      send_photo(OWNER, img, caption="↹ تب فشرده شد.")
+                      continue
+                  elif text == "🌐 مرورگر زنده":
+                      if NOVNC_URL:
+                          send_msg(OWNER, f"🌐 لینک مرورگر زنده:\n{NOVNC_URL}", reply_markup=main_keyboard)
+                      else:
+                          send_msg(OWNER, "❌ لینک مرورگر زنده در این چرخه در دسترس نیست.", reply_markup=main_keyboard)
                       continue
 
-                  if msg.get("text"):
-                      text = msg["text"]
+                  # دستورات متنی
+                  if text.startswith("/go"):
+                      url = text[4:].strip()
+                      if not url.startswith("http"): url = "https://" + url
+                      driver.get(url)
+                      wait_and_sleep(3)
+                      img = screenshot()
+                      send_photo(OWNER, img, caption=f"✅ {url}")
 
-                      if text.startswith("/go"):
-                          url = text[4:].strip()
-                          if not url.startswith("http"):
-                              url = "https://" + url
-                          driver.get(url)
-                          time.sleep(3)
+                  elif text.startswith("/click"):
+                      right_click = not right_click
+                      send_msg(OWNER, f"🖱️ حالت کلیک: {'راست' if right_click else 'چپ'}")
+
+                  elif text.startswith("/typing"):
+                      typing_mode = not typing_mode
+                      send_msg(OWNER, f"⌨️ تایپ خودکار: {'روشن' if typing_mode else 'خاموش'}")
+
+                  elif text.startswith("/txt"):
+                      content = text[5:].strip()
+                      if content:
+                          driver.switch_to.active_element.send_keys(content)
+                          wait_and_sleep(1)
                           img = screenshot()
-                          send_photo(OWNER, img, caption=f"✅ {url}")
+                          send_photo(OWNER, img, caption=f"⌨️ تایپ شد: {content}")
 
-                      elif text.startswith("/click"):
-                          right_click = not right_click
-                          mode = "کلیک راست" if right_click else "کلیک چپ"
-                          send_msg(OWNER, f"🖱️ حالت کلیک: {mode}")
+                  elif typing_mode:
+                      driver.switch_to.active_element.send_keys(text)
+                      wait_and_sleep(1)
+                      img = screenshot()
+                      send_photo(OWNER, img, caption=f"⌨️ تایپ شد: {text}")
 
-                      elif text.startswith("/typing"):
-                          typing_mode = not typing_mode
-                          state = "روشن" if typing_mode else "خاموش"
-                          send_msg(OWNER, f"⌨️ حالت تایپ خودکار {state} شد.")
-
-                      elif text.startswith("/txt"):
-                          # همچنان پشتیبانی میشود
-                          content = text[5:].strip()
-                          if content:
-                              type_text(content)
-                              time.sleep(1)
-                              img = screenshot()
-                              send_photo(OWNER, img, caption=f"⌨️ تایپ شد: {content}")
-
-                      elif typing_mode:
-                          # در حالت تایپ خودکار، خود متن را تایپ کن
-                          type_text(text)
-                          time.sleep(1)
-                          img = screenshot()
-                          send_photo(OWNER, img, caption=f"⌨️ تایپ شد: {text}")
-
+                  # دریافت عکس برای کلیک
                   elif msg.get("photo"):
                       file_id = msg["photo"][-1]["file_id"]
-                      file_info = requests.get(f"{BASE}/getFile?file_id={file_id}").json()
-                      file_path = file_info["result"]["file_path"]
-                      file_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
+                      info = requests.get(f"{BASE}/getFile?file_id={file_id}").json()
+                      file_url = f"https://api.telegram.org/file/bot{TOKEN}/{info['result']['file_path']}"
                       img_data = requests.get(file_url).content
                       coords = find_any_colored_spot(img_data)
                       if coords is None:
-                          send_msg(OWNER, "❌ هیچ نقطه رنگی قابل تشخیص پیدا نشد.")
+                          send_msg(OWNER, "❌ هیچ نقطه رنگی پیدا نشد.")
                       else:
                           act = ActionChains(driver)
                           act.move_by_offset(coords[0], coords[1])
-                          if right_click:
-                              act.context_click()
-                          else:
-                              act.click()
+                          if right_click: act.context_click()
+                          else: act.click()
                           act.perform()
                           act.reset_actions()
-                          time.sleep(2)
+                          wait_and_sleep(3)
                           img = screenshot()
                           mode = "راست" if right_click else "چپ"
                           send_photo(OWNER, img, caption=f"👆 کلیک {mode} شد.")
